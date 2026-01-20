@@ -816,17 +816,7 @@ class AIFlow {
             const blob = await response.blob();
             const blobUrl = URL.createObjectURL(blob);
             
-            const video = document.createElement('video');
-            video.controls = true;
-            video.autoplay = true;
-            video.loop = true;
-            video.muted = true;
-            video.src = blobUrl;
-            
-            previewArea.innerHTML = '';
-            previewArea.appendChild(video);
-            
-            // Save to scenes
+            // Save to scenes (but don't display individual video)
             this.lastVideoBlob = blob;
             this.addScene(blob, blobUrl, prompt);
             
@@ -837,7 +827,10 @@ class AIFlow {
             });
             
             document.getElementById('continuePrompt').value = '';
-            this.showToast('Video continued successfully!', 'success');
+            this.showToast('Video generated! Merging scenes...', 'success');
+            
+            // Immediately merge all scenes into one video
+            await this.mergeAndPlayScenes();
             
         } catch (error) {
             console.error('[AIFlow] ❌ Continue video error:', error);
@@ -854,8 +847,6 @@ class AIFlow {
             `;
             this.showToast('Failed to continue video', 'error');
         }
-        
-        this.mergeAndPlayScenes();
         
         this.isGenerating = false;
         generateBtn.disabled = false;
@@ -913,7 +904,40 @@ class AIFlow {
         container.appendChild(overlay);
         previewArea.appendChild(container);
         
-        this.showToast('Starting video merge...', 'info');
+        this.showToast('Preloading videos...', 'info');
+        
+        // PRELOAD all videos before starting merge
+        const progress = document.getElementById('mergeProgress');
+        if (progress) progress.textContent = 'Preloading videos...';
+        
+        const preloadedVideos = [];
+        for (let i = 0; i < this.scenes.length; i++) {
+            const scene = this.scenes[i];
+            const vid = document.createElement('video');
+            vid.crossOrigin = 'anonymous';
+            vid.muted = true; // Mute during preload
+            vid.preload = 'auto';
+            vid.src = scene.blobUrl;
+            
+            // Wait for video to be fully loaded
+            await new Promise((resolve, reject) => {
+                vid.oncanplaythrough = resolve;
+                vid.onerror = reject;
+                vid.load();
+            });
+            
+            // Set canvas size from first video
+            if (i === 0) {
+                canvas.width = vid.videoWidth;
+                canvas.height = vid.videoHeight;
+            }
+            
+            preloadedVideos.push(vid);
+            if (progress) progress.textContent = `Preloaded ${i + 1} / ${this.scenes.length}`;
+        }
+        
+        console.log('[AIFlow] 🎬 All videos preloaded:', preloadedVideos.length);
+        this.showToast('Starting recording...', 'info');
 
         // Web Audio Context for audio capture
         const AudioContext = window.AudioContext || window.webkitAudioContext;
@@ -945,11 +969,23 @@ class AIFlow {
         
         mediaRecorder.start();
         
-        // Drawing loop
+        // Drawing loop - preserve last frame during transitions
         let isRecording = true;
+        let lastFrameData = null; // Store the last valid frame
+        
         const draw = () => {
             if (!isRecording) return;
-            ctx.drawImage(player, 0, 0, canvas.width, canvas.height);
+            
+            // Only draw if video is playing and has valid dimensions
+            if (player.readyState >= 2 && player.videoWidth > 0) {
+                ctx.drawImage(player, 0, 0, canvas.width, canvas.height);
+                // Save current frame as backup for transitions
+                lastFrameData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+            } else if (lastFrameData) {
+                // Video not ready yet - keep showing the last frame
+                ctx.putImageData(lastFrameData, 0, 0);
+            }
+            
             requestAnimationFrame(draw);
         };
         draw();
