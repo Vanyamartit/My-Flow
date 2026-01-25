@@ -27,11 +27,18 @@ class AIFlow {
         this.isGenerating = false;
         this.scenes = []; // For video chaining
         this.lastVideoBlob = null; // Last generated video blob
+        
+        // Frame Mode State
+        this.frameMode = 'auto'; // 'auto' or 'custom'
+        this.firstFrameImage = null; // base64 data URL
+        this.lastFrameImage = null; // base64 data URL (Veo only)
+        
         console.log('[AIFlow] 📊 Initial state:', {
             currentTab: this.currentTab,
             galleryItems: this.gallery.length,
             isGenerating: this.isGenerating,
-            scenes: this.scenes.length
+            scenes: this.scenes.length,
+            frameMode: this.frameMode
         });
         
         // Initialize
@@ -332,99 +339,228 @@ class AIFlow {
         
         const previewArea = document.getElementById('videoPreview');
         const generateBtn = document.getElementById('generateVideoBtn');
+        const durationInput = document.getElementById('videoDuration');
         
-        console.log('[AIFlow] 🎬 Preview area:', previewArea);
-        console.log('[AIFlow] 🎬 Generate button:', generateBtn);
+        // Get requested duration
+        const requestedDuration = parseInt(durationInput ? durationInput.value : 5) || 5;
         
         generateBtn.disabled = true;
-        previewArea.innerHTML = `
-            <div class="preview-placeholder">
-                <div class="loading-shimmer" style="position: absolute; inset: 0;"></div>
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="z-index: 1;">
-                    <rect x="2" y="4" width="20" height="16" rx="2"/>
-                    <path d="M10 9l5 3-5 3V9z"/>
-                </svg>
-                <p style="z-index: 1;">Generating video... This may take 1-3 minutes</p>
-                <small style="z-index: 1; opacity: 0.7;">Video generation requires API key for best results</small>
-            </div>
-        `;
-        console.log('[AIFlow] 🎬 Loading state displayed');
         
         try {
             const model = this.settings.videoModel;
-            const encodedPrompt = encodeURIComponent(prompt.trim());
-            
-            // Set max duration based on model (veo: 4/6/8, seedance: 2-10)
-            let duration;
+            // Determine max chunk duration based on model
+            let maxChunkDuration;
             if (model === 'veo') {
-                duration = 8; // Max for veo
+                maxChunkDuration = 8;
             } else {
-                duration = 10; // Max for seedance/seedance-pro
+                maxChunkDuration = 10;
             }
             
-            // Video generation uses gen.pollinations.ai/image/ endpoint with video models
-            // Using ?key= query param for authentication (more reliable for CORS)
-            let videoUrl = `https://gen.pollinations.ai/image/${encodedPrompt}?model=${model}&duration=${duration}`;
+            // Calculate segments
+            const totalSegments = Math.ceil(requestedDuration / maxChunkDuration);
+            console.log(`[AIFlow] 🎬 Planning ${totalSegments} segments for ${requestedDuration}s total (max valid chunk: ${maxChunkDuration}s)`);
             
-            // Add API key as query parameter
-            if (this.apiKey) {
-                videoUrl += `&key=${this.apiKey}`;
-                console.log('[AIFlow] 🎬 API key added to URL');
-            } else {
-                console.warn('[AIFlow] ⚠️ No API key set - video generation will fail!');
+            // Setup Visual Chain
+            const chainContainer = document.getElementById('chainProgress');
+            if (chainContainer) {
+                if (totalSegments > 1) {
+                    chainContainer.classList.remove('hidden');
+                    chainContainer.innerHTML = '';
+                    
+                    // Render placeholders
+                    for (let j = 0; j < totalSegments; j++) {
+                        const startSec = j * maxChunkDuration;
+                        const endSec = Math.min((j + 1) * maxChunkDuration, requestedDuration);
+                        
+                        const card = document.createElement('div');
+                        card.className = `segment-card pending`;
+                        card.id = `segment-card-${j}`;
+                        card.innerHTML = `
+                            <div class="segment-header">
+                                <span>Segment ${j + 1}</span>
+                                <span class="segment-status" id="segment-status-${j}">Waiting</span>
+                            </div>
+                            <div class="segment-preview" id="segment-preview-${j}">
+                                <div class="loading-shimmer" style="opacity: 0.1"></div>
+                                <span style="font-size: 0.8rem; opacity: 0.7; z-index: 1;">${startSec}-${endSec}s</span>
+                            </div>
+                        `;
+                        chainContainer.appendChild(card);
+                    }
+                } else {
+                    chainContainer.classList.add('hidden');
+                }
             }
+
+            let currentPrompt = prompt.trim();
+            let lastFrameUrl = null;
             
-            console.log('[AIFlow] 🎬 Request URL:', videoUrl.replace(this.apiKey, '***'));
-            console.log('[AIFlow] 🎬 Using model:', model, 'duration:', duration, 'seconds');
-            console.log('[AIFlow] 🎬 Fetching video...');
-            
-            // Fetch video as blob to handle CORS and loading properly
-            const response = await fetch(videoUrl);
-            console.log('[AIFlow] 🎬 Response status:', response.status);
-            console.log('[AIFlow] 🎬 Response content-type:', response.headers.get('content-type'));
-            
-            if (!response.ok) {
-                const errorText = await response.text();
-                console.error('[AIFlow] ❌ Video API error response:', errorText);
-                throw new Error(`Video API error: ${response.status} - ${errorText.substring(0, 100)}`);
-            }
-            
-            console.log('[AIFlow] 🎬 Converting response to blob...');
-            const blob = await response.blob();
-            console.log('[AIFlow] 🎬 Blob size:', blob.size, 'bytes, type:', blob.type);
-            const blobUrl = URL.createObjectURL(blob);
-            console.log('[AIFlow] 🎬 Blob URL created:', blobUrl);
-            
-            const video = document.createElement('video');
-            video.controls = true;
-            video.autoplay = true;
-            video.loop = true;
-            video.muted = true;
-            video.src = blobUrl;
-            
-            previewArea.innerHTML = '';
-            previewArea.appendChild(video);
-            console.log('[AIFlow] 🎬 Video element added to preview');
-            
-            // Save to scenes for chaining
-            this.lastVideoBlob = blob;
-            this.addScene(blob, blobUrl, prompt);
-            
-            this.addToGallery({
-                type: 'video',
-                url: blobUrl,
-                prompt: prompt
-            });
-            
-            this.showToast('Video generated successfully!', 'success');
-            console.log('%c[AIFlow] ✅ Video generated successfully!', 'color: #22c55e; font-weight: bold;');
-            this.isGenerating = false;
-            generateBtn.disabled = false;
+            // Loop for segments
+            for (let i = 0; i < totalSegments; i++) {
+                const isFirstSegment = i === 0;
+                
+                // Update specific card status
+                if (totalSegments > 1) {
+                    const currentCard = document.getElementById(`segment-card-${i}`);
+                    const currentStatus = document.getElementById(`segment-status-${i}`);
+                    const currentPreview = document.getElementById(`segment-preview-${i}`);
+                    
+                    if (currentCard) {
+                        currentCard.classList.remove('pending');
+                        currentCard.classList.add('active');
+                        currentStatus.textContent = 'Generating...';
+                        currentPreview.innerHTML = `
+                            <div class="loading-shimmer"></div>
+                            <span style="font-size: 0.8rem; opacity: 0.7; z-index: 1; color: white;">Generating...</span>
+                        `;
+                    }
+                }
+
+                // Update Main Preview Area (overall progress)
+                previewArea.innerHTML = `
+                    <div class="preview-placeholder">
+                        <div class="loading-shimmer" style="position: absolute; inset: 0;"></div>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" style="z-index: 1;">
+                            <rect x="2" y="4" width="20" height="16" rx="2"/>
+                            <path d="M10 9l5 3-5 3V9z"/>
+                        </svg>
+                        <p style="z-index: 1;">Generating segment ${i + 1}/${totalSegments}...</p>
+                        <small style="z-index: 1; opacity: 0.7;">${model} model • Lasts ~${maxChunkDuration}s per segment</small>
+                    </div>
+                `;
+                
+                console.log(`[AIFlow] 🎬 Starting generation of segment ${i + 1}/${totalSegments}`);
+                
+                // Add segment context to prompt if multiple segments
+                let effectivePrompt = currentPrompt;
+                if (totalSegments > 1) {
+                    effectivePrompt = `${currentPrompt}. You are generating segment ${i + 1}. NEVER do what is not in your segment.`;
+                    console.log(`[AIFlow] 🎬 Contextual prompt: "${effectivePrompt}"`);
+                }
+                
+                const encodedPrompt = encodeURIComponent(effectivePrompt);
+                
+                // Construct URL
+                // Only uses last segment duration if it's the last one AND we want precise timing?
+                // Actually APIs usually take max duration. We'll request maxChunkDuration for all except maybe last?
+                // But Pollinations usually does fixed durations. Let's stick to maxChunkDuration.
+                const durationParam = maxChunkDuration; 
+                
+                let videoUrl = `https://gen.pollinations.ai/image/${encodedPrompt}?model=${model}&duration=${durationParam}`;
+                
+                if (this.apiKey) {
+                    videoUrl += `&key=${this.apiKey}`;
+                }
+                
+                // Handle Image Input (First Frame)
+                // Case A: First Segment + Custom Frame Mode (User uploaded start frame)
+                // Case B: Subsequent Segments (Chaining from previous segment)
+                
+                let imageUrlToAdd = null;
+                
+                if (isFirstSegment) {
+                    if (this.frameMode === 'custom' && this.firstFrameImage) {
+                        this.showToast('Uploading first frame...', 'info');
+                        const url = await this.uploadImageToImgBB(this.firstFrameImage);
+                        imageUrlToAdd = url;
+                        
+                        // Veo interpolation check
+                        if (model === 'veo' && this.lastFrameImage) {
+                             const lastUrl = await this.uploadImageToImgBB(this.lastFrameImage);
+                             imageUrlToAdd = `${url},${lastUrl}`;
+                        }
+                    }
+                } else {
+                    // Subsequent segments: Use lastFrameUrl from previous iteration
+                    if (lastFrameUrl) {
+                        imageUrlToAdd = lastFrameUrl;
+                        // Add some continuity text to prompt if needed, strictly speaking we just keep the prompt
+                        // or user might want to evolve it. For now, static prompt.
+                    }
+                }
+                
+                if (imageUrlToAdd) {
+                    videoUrl += `&image=${encodeURIComponent(imageUrlToAdd)}`;
+                    console.log('[AIFlow] 🎬 Added image to request:', imageUrlToAdd);
+                }
+                
+                console.log('[AIFlow] 🎬 Fetching video...');
+                const response = await fetch(videoUrl);
+                
+                if (!response.ok) {
+                    if (response.status === 402) {
+                        throw new Error(`Limit reached (Payment Required). You may need to wait or use an API key.`);
+                    }
+                    throw new Error(`Segment ${i + 1} failed: ${response.status}`);
+                }
+                
+                const blob = await response.blob();
+                const blobUrl = URL.createObjectURL(blob);
+                
+                // Save this segment
+                this.addScene(blob, blobUrl, `Part ${i + 1}: ${currentPrompt}`);
+                this.addToGallery({
+                    type: 'video',
+                    url: blobUrl,
+                    prompt: `Part ${i + 1}: ${currentPrompt}`
+                });
+                
+                // Update Card to Done
+                if (totalSegments > 1) {
+                    const currentCard = document.getElementById(`segment-card-${i}`);
+                    const currentStatus = document.getElementById(`segment-status-${i}`);
+                    const currentPreview = document.getElementById(`segment-preview-${i}`);
+                    
+                    if (currentCard) {
+                        currentCard.classList.remove('active');
+                        currentCard.classList.add('done');
+                        currentStatus.textContent = 'Done';
+                        
+                        const miniVideo = document.createElement('video');
+                        miniVideo.src = blobUrl;
+                        miniVideo.muted = true;
+                        miniVideo.autoplay = true;
+                        miniVideo.loop = true;
+                        
+                        currentPreview.innerHTML = '';
+                        currentPreview.appendChild(miniVideo);
+                    }
+                }
+                
+                // If there's a next segment, we need to extract the last frame
+                if (i < totalSegments - 1) {
+                    this.showToast(`Segment ${i + 1} done. Extracting frame for next part...`, 'success');
+                    console.log('[AIFlow] 🎬 Extracting last frame for chaining...');
+                    const frameDataUrl = await this.extractLastFrame(blobUrl);
+                    if (frameDataUrl) {
+                        console.log('[AIFlow] 🎬 Frame extracted, uploading...');
+                        lastFrameUrl = await this.uploadImageToImgBB(frameDataUrl);
+                        console.log('[AIFlow] 🎬 Frame uploaded for next segment:', lastFrameUrl);
+                    } else {
+                        console.warn('[AIFlow] ⚠️ Could not extract last frame, next segment might lack continuity');
+                        lastFrameUrl = null;
+                    }
+                } else {
+                    // Final segment done
+                    // Show the LAST generated video in preview
+                    const video = document.createElement('video');
+                    video.controls = true;
+                    video.autoplay = true;
+                    video.loop = true;
+                    video.muted = true;
+                    video.src = blobUrl;
+                    
+                    previewArea.innerHTML = '';
+                    previewArea.appendChild(video);
+                    
+                    this.showToast('All video segments generated!', 'success');
+                }
+            } // end loop
             
         } catch (error) {
             console.error('%c[AIFlow] ❌ Video generation error!', 'color: #ef4444; font-weight: bold;');
             console.error('[AIFlow] ❌ Error details:', error);
-            console.error('[AIFlow] ❌ Error message:', error.message);
+            
             previewArea.innerHTML = `
                 <div class="preview-placeholder">
                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
@@ -432,15 +568,15 @@ class AIFlow {
                         <line x1="12" y1="8" x2="12" y2="12"/>
                         <line x1="12" y1="16" x2="12.01" y2="16"/>
                     </svg>
-                    <p>Error generating video</p>
-                    <small style="opacity: 0.7;">${this.escapeHtml(error.message)}</small>
-                    <small style="opacity: 0.5;">Try adding an API key in Settings</small>
+                    <p>Generation stopped</p>
+                    <small style="opacity: 0.9; color: var(--error);">${this.escapeHtml(error.message)}</small>
+                    <small style="opacity: 0.5;">Check "Scenes" below for any completed parts.</small>
                 </div>
             `;
-            this.showToast('Failed to generate video', 'error');
+            this.showToast(error.message, 'error');
+        } finally {
             this.isGenerating = false;
             generateBtn.disabled = false;
-            console.log('[AIFlow] 🎬 Error handled, isGenerating set to false');
         }
     }
     
@@ -1099,6 +1235,93 @@ class AIFlow {
         }
     }
     
+    // ===== Frame Upload Helpers =====
+    setupFrameUpload(prefix, onSet, onClear) {
+        const zone = document.getElementById(`${prefix}Zone`);
+        const input = document.getElementById(`${prefix}Input`);
+        const placeholder = document.getElementById(`${prefix}Placeholder`);
+        const preview = document.getElementById(`${prefix}Preview`);
+        const img = document.getElementById(`${prefix}Img`);
+        const clearBtn = document.getElementById(`clear${prefix.charAt(0).toUpperCase() + prefix.slice(1)}`);
+        
+        if (!zone || !input) {
+            console.warn(`[AIFlow] ⚠️ Frame upload elements not found for: ${prefix}`);
+            return;
+        }
+        
+        // Click to upload
+        zone.addEventListener('click', (e) => {
+            if (e.target !== clearBtn && !clearBtn?.contains(e.target)) {
+                input.click();
+            }
+        });
+        
+        // Drag and drop
+        zone.addEventListener('dragover', (e) => {
+            e.preventDefault();
+            zone.classList.add('dragover');
+        });
+        
+        zone.addEventListener('dragleave', () => {
+            zone.classList.remove('dragover');
+        });
+        
+        zone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            zone.classList.remove('dragover');
+            
+            const file = e.dataTransfer.files[0];
+            if (file && file.type.startsWith('image/')) {
+                this.handleFrameFile(file, img, placeholder, preview, onSet);
+            }
+        });
+        
+        // File input change
+        input.addEventListener('change', (e) => {
+            const file = e.target.files[0];
+            if (file) {
+                this.handleFrameFile(file, img, placeholder, preview, onSet);
+            }
+        });
+        
+        // Clear button
+        clearBtn?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            img.src = '';
+            placeholder?.classList.remove('hidden');
+            preview?.classList.add('hidden');
+            input.value = '';
+            onClear();
+        });
+    }
+    
+    handleFrameFile(file, img, placeholder, preview, onSet) {
+        const reader = new FileReader();
+        reader.onload = (e) => {
+            const dataUrl = e.target.result;
+            img.src = dataUrl;
+            placeholder?.classList.add('hidden');
+            preview?.classList.remove('hidden');
+            onSet(dataUrl);
+        };
+        reader.readAsDataURL(file);
+    }
+    
+    updateLastFrameVisibility() {
+        const lastFrameGroup = document.getElementById('lastFrameGroup');
+        const model = this.settings.videoModel;
+        
+        // Only Veo supports last frame (interpolation)
+        if (model === 'veo') {
+            lastFrameGroup?.classList.remove('hidden');
+            console.log('[AIFlow] 🖼️ Last frame visible (Veo model)');
+        } else {
+            lastFrameGroup?.classList.add('hidden');
+            this.lastFrameImage = null; // Clear last frame when switching away from Veo
+            console.log('[AIFlow] 🖼️ Last frame hidden (not Veo model)');
+        }
+    }
+    
     // ===== Event Binding =====
     bindEvents() {
         console.log('[AIFlow] 🎯 bindEvents() started...');
@@ -1202,6 +1425,48 @@ class AIFlow {
         playAllScenesBtn?.addEventListener('click', () => {
             console.log('[AIFlow] 👆 Play All Scenes button clicked!');
             this.mergeAndPlayScenes();
+        });
+        
+        // ===== Frame Mode Events =====
+        // Frame mode toggle
+        document.querySelectorAll('.frame-mode-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const mode = btn.dataset.mode;
+                console.log('[AIFlow] 🖼️ Frame mode changed to:', mode);
+                
+                // Update active state
+                document.querySelectorAll('.frame-mode-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                
+                this.frameMode = mode;
+                
+                // Show/hide frame uploads
+                const frameUploads = document.getElementById('frameUploads');
+                if (mode === 'custom') {
+                    frameUploads?.classList.remove('hidden');
+                    this.updateLastFrameVisibility();
+                } else {
+                    frameUploads?.classList.add('hidden');
+                }
+            });
+        });
+        
+        // First frame upload
+        this.setupFrameUpload('firstFrame', (dataUrl) => {
+            this.firstFrameImage = dataUrl;
+            console.log('[AIFlow] 🖼️ First frame image set');
+        }, () => {
+            this.firstFrameImage = null;
+            console.log('[AIFlow] 🖼️ First frame image cleared');
+        });
+        
+        // Last frame upload
+        this.setupFrameUpload('lastFrame', (dataUrl) => {
+            this.lastFrameImage = dataUrl;
+            console.log('[AIFlow] 🖼️ Last frame image set');
+        }, () => {
+            this.lastFrameImage = null;
+            console.log('[AIFlow] 🖼️ Last frame image cleared');
         });
         
         // Gallery filters
@@ -1321,6 +1586,9 @@ class AIFlow {
         
         this.saveSettings();
         this.closeSettings();
+        
+        // Update last frame visibility based on new video model
+        this.updateLastFrameVisibility();
     }
     
     resetSettings() {
